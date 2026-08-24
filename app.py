@@ -19,11 +19,50 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="Nicos Dynasty League", layout="wide")
+st.set_page_config(page_title="Nicos Dynasty League", layout="wide", page_icon="🏈")
 
 ACCENT = "#1D4ED8"  # blue, swapped in for Bozos' garnet
 
-st.markdown(f"<style>h1, h2, h3 {{ color: {ACCENT}; }}</style>", unsafe_allow_html=True)
+st.markdown(
+    f"""<style>
+    h1, h2, h3 {{ color: {ACCENT}; }}
+    #MainMenu {{visibility: hidden;}}
+    footer {{visibility: hidden;}}
+    header {{visibility: hidden;}}
+    .block-container {{padding-top: 2rem; padding-bottom: 2rem; max-width: 1300px;}}
+
+    div[data-testid="stDataFrame"] {{border: 1px solid #E5E7EB; border-radius: 8px; overflow: hidden;}}
+
+    button[data-baseweb="tab"] {{
+        font-size: 1rem; font-weight: 600; padding: 10px 18px; color: #6B7280;
+    }}
+    button[data-baseweb="tab"][aria-selected="true"] {{
+        color: {ACCENT}; border-bottom: 3px solid {ACCENT};
+    }}
+    div[data-baseweb="tab-list"] {{ gap: 4px; border-bottom: 2px solid #E5E7EB; }}
+
+    div[data-testid="stMetric"] {{
+        background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 10px;
+        padding: 14px 16px;
+    }}
+    div[data-testid="stMetricLabel"] {{ font-weight: 600; color: #6B7280; }}
+    div[data-testid="stMetricValue"] {{ color: {ACCENT}; }}
+
+    div[data-baseweb="select"] > div {{
+        border-radius: 8px; border: 1px solid #E5E7EB;
+    }}
+
+    .stButton > button {{
+        border-radius: 8px; border: 1px solid {ACCENT}; color: {ACCENT}; font-weight: 600;
+    }}
+    .stButton > button:hover {{
+        background: {ACCENT}; color: white;
+    }}
+
+    hr {{ margin: 1.5rem 0; border-color: #E5E7EB; }}
+    </style>""",
+    unsafe_allow_html=True,
+)
 
 CURRENT_SEASON = api.CURRENT_SEASON
 CURRENT_LEAGUE_ID = api.CURRENT_LEAGUE_ID
@@ -95,7 +134,7 @@ season_history = analytics.build_season_history()
 weekly_history = analytics.build_full_weekly_history()
 
 tab_home, tab_profile, tab_current, tab_history, tab_txns, tab_rivalries, tab_record, tab_sos, tab_draft = st.tabs(
-    ["Home", "Player Profile", "Current Season", "League History", "Transactions", "Rivalries", "Record Book", "Strength of Schedule", "Draft History"]
+    ["🏠 Home", "👤 Player Profile", "📅 Current Season", "📚 League History", "🔄 Transactions", "🔥 Rivalries", "📖 Record Book", "📆 Strength of Schedule", "🎯 Draft History"]
 )
 
 # ---------------------------------------------------------------------
@@ -157,23 +196,41 @@ with tab_home:
             f"{DISPLAY_SEASON} season, {week_label} — weighted 30% overall record, 22% overall PPG, "
             "18% last-5 record, 12% last-5 PPG, 10% last-3 record, 8% last-3 PPG."
         )
+        rank_colors = {1: "#F59E0B", 2: "#9CA3AF", 3: "#B45309"}
         for _, row in pr_df.iterrows():
             move = ""
             if row["roster_id"] in prev_rank:
                 delta = prev_rank[row["roster_id"]] - row["Rank"]
                 if delta > 0:
-                    move = f"<span style='color:#16A34A;font-weight:700;'>▲ {delta}</span>"
+                    move = f"<span style='color:#16A34A;font-weight:700;font-size:.85rem;'>▲ {delta}</span>"
                 elif delta < 0:
-                    move = f"<span style='color:#DC2626;font-weight:700;'>▼ {abs(delta)}</span>"
+                    move = f"<span style='color:#DC2626;font-weight:700;font-size:.85rem;'>▼ {abs(delta)}</span>"
                 else:
-                    move = "<span style='color:#6B7280;'>—</span>"
-            with st.container(border=True):
-                c1, c2 = st.columns([6, 1])
-                with c1:
-                    st.markdown(f"**{int(row['Rank'])}. {row['Team']} {row['Record']}** ({row['PPG']} PPG)")
-                    st.caption(f"L5: {row['L5']} {row['L5 PPG']} PPG | L3: {row['L3']} {row['L3 PPG']} PPG")
-                with c2:
-                    st.markdown(f"<div style='text-align:right;padding-top:8px;'>{move}</div>", unsafe_allow_html=True)
+                    move = "<span style='color:#9CA3AF;font-size:.85rem;'>—</span>"
+            rank_int = int(row["Rank"])
+            badge_color = rank_colors.get(rank_int, "#E5E7EB")
+            badge_text = "#FFFFFF" if rank_int in rank_colors else "#374151"
+            st.markdown(
+                f"""<div style='display:flex;align-items:center;justify-content:space-between;
+                background:#FFFFFF;border:1px solid #E5E7EB;border-left:4px solid {ACCENT};
+                border-radius:10px;padding:14px 18px;margin-bottom:8px;box-shadow:0 1px 2px rgba(0,0,0,0.04);'>
+                    <div style='display:flex;align-items:center;gap:14px;'>
+                        <div style='background:{badge_color};color:{badge_text};font-weight:800;
+                        border-radius:50%;width:32px;height:32px;display:flex;align-items:center;
+                        justify-content:center;font-size:.9rem;flex-shrink:0;'>{rank_int}</div>
+                        <div>
+                            <div style='font-weight:700;font-size:1rem;color:#111827;'>{row['Team']}
+                                <span style='font-weight:500;color:#6B7280;'>{row['Record']} · {row['PPG']} PPG</span>
+                            </div>
+                            <div style='font-size:.8rem;color:#9CA3AF;margin-top:2px;'>
+                                L5: {row['L5']} ({row['L5 PPG']} PPG) &nbsp;|&nbsp; L3: {row['L3']} ({row['L3 PPG']} PPG)
+                            </div>
+                        </div>
+                    </div>
+                    <div>{move}</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
 
 # ---------------------------------------------------------------------
 # PLAYER PROFILE
@@ -420,11 +477,6 @@ with tab_profile:
                                 st.markdown(f"**{a['name']}** ({a['position']})")
                                 st.caption(f"{a['value']:,} · <span style='color:#DC2626;'>{a['change']:,}</span>", unsafe_allow_html=True)
 
-                st.caption(
-                    "FantasyCalc doesn't expose real historical values (no history endpoint I could find), so 'start of last "
-                    "season' or 'start of the dynasty league' genuinely aren't available. Instead the app now saves one real "
-                    "snapshot per day locally, so 'Since start of 2024 season' will become more useful the longer you keep running it."
-                )
 
 # ---------------------------------------------------------------------
 # CURRENT SEASON - standings + in the hunt + playoff bracket, one page
