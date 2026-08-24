@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+value_history.json
+dynasty_value_snapshots.json
+.venv/
+venv/
