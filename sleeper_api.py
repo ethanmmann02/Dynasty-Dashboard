@@ -86,6 +86,14 @@ def get_transactions(league_id: str, round_: int) -> list:
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
+def get_traded_picks(league_id: str) -> list:
+    """All traded picks in this league (past and future) - each entry has season, round,
+    roster_id (ORIGINAL owner), previous_owner_id, and owner_id (CURRENT/final owner).
+    Lets us resolve a pick through multiple re-trades to whoever actually held it on draft day."""
+    return _get(f"{BASE}/league/{league_id}/traded_picks")
+
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_drafts(league_id: str) -> list:
     return _get(f"{BASE}/league/{league_id}/drafts")
 

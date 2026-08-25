@@ -133,8 +133,8 @@ manager_directory = analytics.get_manager_directory()
 season_history = analytics.build_season_history()
 weekly_history = analytics.build_full_weekly_history()
 
-tab_home, tab_profile, tab_current, tab_history, tab_txns, tab_rivalries, tab_record, tab_sos, tab_draft = st.tabs(
-    ["🏠 Home", "👤 Player Profile", "📅 Current Season", "📚 League History", "🔄 Transactions", "🔥 Rivalries", "📖 Record Book", "📆 Strength of Schedule", "🎯 Draft History"]
+tab_home, tab_profile, tab_current, tab_history, tab_txns, tab_rivalries, tab_record, tab_sos, tab_draft, tab_trades = st.tabs(
+    ["🏠 Home", "👤 Player Profile", "📅 Current Season", "📚 League History", "🔄 Transactions", "🔥 Rivalries", "📖 Record Book", "📆 Strength of Schedule", "🎯 Draft History", "🤝 Trade History"]
 )
 
 # ---------------------------------------------------------------------
@@ -814,6 +814,116 @@ with tab_sos:
                     "other team's score that week, not just their actual opponent. Positive luck means outperforming their "
                     "scoring; negative means the schedule cost them wins their scoring deserved."
                 )
+
+
+# ---------------------------------------------------------------------
+# TRADE HISTORY - hindsight grades using current FantasyCalc values
+# ---------------------------------------------------------------------
+with tab_trades:
+    st.subheader("Trade History")
+    st.caption(
+        "Grades use TODAY's FantasyCalc values applied to both sides, not values at the time of the trade "
+        "(FantasyCalc doesn't expose historical data) - so this is a hindsight read, not a trade-day fairness call. "
+        "Picks already drafted are valued as the actual player taken; picks marked * are still in the future and use "
+        "a standard round-based estimate."
+    )
+
+    trades_df = analytics.build_trade_grades(tuple(api.ALL_SEASONS), CURRENT_SEASON)
+
+    if trades_df.empty:
+        st.info("No completed trades found yet.")
+    else:
+        grade_colors = {
+            "A+": "#065F46", "A": "#16A34A", "A-": "#4ADE80",
+            "B": "#84CC16", "C": "#9CA3AF",
+            "D-": "#FB923C", "D": "#EA580C", "F": "#991B1B",
+        }
+
+        def grade_badge(grade, faded=False):
+            color = grade_colors.get(grade, "#9CA3AF")
+            opacity = "0.45" if faded else "1"
+            return (f"<span style='background:{color};color:white;font-weight:800;border-radius:6px;"
+                    f"padding:2px 9px;font-size:.85rem;opacity:{opacity};'>{grade}</span>")
+
+        def trade_card(row):
+            at_deal_a = row.get("At-Deal Grade A")
+            at_deal_b = row.get("At-Deal Grade B")
+            badges_a = grade_badge(row["Grade A"])
+            badges_b = grade_badge(row["Grade B"])
+            if at_deal_a and at_deal_a != row["Grade A"]:
+                badges_a = grade_badge(at_deal_a, faded=True) + " → " + badges_a
+            if at_deal_b and at_deal_b != row["Grade B"]:
+                badges_b = grade_badge(at_deal_b, faded=True) + " → " + badges_b
+
+            st.markdown(
+                f"""<div style='background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;
+                padding:16px 18px;margin-bottom:10px;box-shadow:0 1px 2px rgba(0,0,0,0.04);'>
+                <div style='font-size:.78rem;color:#9CA3AF;margin-bottom:8px;'>{row['Season']} · Week {row['Week']} · {row['Date']}</div>
+                <div style='display:flex;gap:24px;flex-wrap:wrap;'>
+                    <div style='flex:1;min-width:220px;'>
+                        <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
+                            {badges_a}
+                            <span style='font-weight:700;'>{row['Team A']}</span>
+                            <span style='color:#6B7280;font-size:.8rem;'>{row['Result A']} · {row['Value A']:,}</span>
+                        </div>
+                        <div style='font-size:.82rem;color:#374151;'>{row['Received A']}</div>
+                    </div>
+                    <div style='flex:1;min-width:220px;'>
+                        <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
+                            {badges_b}
+                            <span style='font-weight:700;'>{row['Team B']}</span>
+                            <span style='color:#6B7280;font-size:.8rem;'>{row['Result B']} · {row['Value B']:,}</span>
+                        </div>
+                        <div style='font-size:.82rem;color:#374151;'>{row['Received B']}</div>
+                    </div>
+                </div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("**Most Lopsided Trades**")
+        for _, row in trades_df.head(5).iterrows():
+            trade_card(row)
+
+        st.markdown("---")
+        st.markdown("**Most Commonly Traded Players**")
+        most_traded = analytics.build_most_traded_players(tuple(api.ALL_SEASONS))
+        if not most_traded:
+            st.caption("No trade data yet.")
+        else:
+            mt_cols = st.columns(2)
+            for i, p in enumerate(most_traded):
+                breakdown_str = ", ".join(f"{team} ({cnt}x)" for team, cnt in p["breakdown"])
+                with mt_cols[i % 2]:
+                    st.markdown(
+                        f"""<div style='background:#F9FAFB;border:1px solid #E5E7EB;border-radius:8px;
+                        padding:10px 14px;margin-bottom:8px;'>
+                        <div style='font-weight:700;'>{p['name']} <span style='color:#6B7280;font-weight:500;'>({p['position']})</span>
+                        <span style='float:right;color:#1D4ED8;font-weight:800;'>{p['total']}x traded</span></div>
+                        <div style='font-size:.78rem;color:#6B7280;margin-top:4px;'>Acquired by: {breakdown_str}</div>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+        st.markdown("---")
+        st.markdown("**Browse All Trades**")
+        team_options = ["All"] + sorted(set(trades_df["Team A"]) | set(trades_df["Team B"]))
+        trade_team_filter = st.selectbox("Team", team_options, key="trade_team_filter")
+        season_options = ["All"] + sorted(trades_df["Season"].unique(), reverse=True)
+        trade_season_filter = st.selectbox("Season", season_options, key="trade_season_filter")
+
+        browse_df = trades_df
+        if trade_team_filter != "All":
+            browse_df = browse_df[(browse_df["Team A"] == trade_team_filter) | (browse_df["Team B"] == trade_team_filter)]
+        if trade_season_filter != "All":
+            browse_df = browse_df[browse_df["Season"] == trade_season_filter]
+        browse_df = browse_df.sort_values("Date", ascending=False)
+
+        if browse_df.empty:
+            st.caption("No trades match this filter.")
+        else:
+            for _, row in browse_df.iterrows():
+                trade_card(row)
 
 # ---------------------------------------------------------------------
 # DRAFT HISTORY - rookie drafts only (2024 startup draft excluded)

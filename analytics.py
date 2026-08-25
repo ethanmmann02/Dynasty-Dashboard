@@ -7,6 +7,7 @@ rivalry index, streaks, top scores, transactions, and the offseason
 roster-diff used on Player Profile.
 """
 
+import functools
 import pandas as pd
 import streamlit as st
 
@@ -922,7 +923,7 @@ def build_transactions_log(seasons: tuple) -> pd.DataFrame:
                             pk_season, pk_round, pk_orig_roster = pk.get("season"), pk.get("round"), pk.get("roster_id")
                             if not pk_season or not pk_round:
                                 continue
-                            slot_label = get_pick_label(int(pk_season), pk_round, pk_orig_roster)
+                            slot_label = get_pick_label(int(pk_season), int(pk_round), pk_orig_roster)
                             label = f"{pk_season} {_ordinal_round(pk_round)} Round Pick"
                             if slot_label:
                                 label += f" ({slot_label})"
@@ -1675,3 +1676,314 @@ def build_value_movers_v2(roster_player_ids, all_players, n=4, min_change=50):
     droppers = sorted([a for a in movers if a["change"] < 0], key=lambda a: a["change"])[:n]
     return {"risers": risers, "droppers": droppers, "note": note}
 
+
+# ---------------------------------------------------------------------
+# Trade grades - hindsight value comparison using current FantasyCalc
+# values. Resolved picks are valued as the actual player drafted with
+# them; unresolved future picks use a standard round/slot/years-out
+# estimate chart (NOT FantasyCalc data - they don't expose pick values
+# via the public API, so this is a best-effort industry-standard chart).
+# ---------------------------------------------------------------------
+PICK_ROUND_BASE = {1: 4000, 2: 1200, 3: 500, 4: 250}
+
+
+def estimate_pick_value(pk_season, pk_round: int, current_season: int) -> int:
+    base = PICK_ROUND_BASE.get(pk_round, 100)
+    years_out = max(0, int(pk_season) - current_season)
+    return round(base * (0.90 ** years_out))
+
+
+@functools.lru_cache(maxsize=32)
+def _get_owner_id_to_roster_id(season: int) -> dict:
+    """owner_id -> roster_id for a given season's league - lets us translate a roster_id
+    from one season's numbering into another season's numbering for the same manager."""
+    league_id = api.SEASON_LEAGUE_IDS.get(season)
+    if not league_id:
+        return {}
+    try:
+        rosters = api.get_rosters(league_id)
+        users = api.get_users(league_id)
+        owner_id_map = api.build_owner_id_map(users, rosters)  # roster_id -> owner_id
+    except Exception:
+        return {}
+    return {v: k for k, v in owner_id_map.items()}  # flip to owner_id -> roster_id
+
+
+@functools.lru_cache(maxsize=1)
+def build_pick_ownership_log() -> dict:
+    """(pick_season_str, round, origin_persistent_owner_id) -> final_persistent_owner_id.
+    Self-derived by scanning every trade across every season's league, tracking every
+    reassignment of a given pick and keeping whichever happened most recently. This avoids
+    depending on Sleeper's traded_picks endpoint, which appears to drop entries once a
+    pick's season has already been drafted - exactly the case that was failing."""
+    log = {}  # key -> (latest_timestamp, final_owner_id)
+    for season, league_id in api.SEASON_LEAGUE_IDS.items():
+        try:
+            rosters = api.get_rosters(league_id)
+            users = api.get_users(league_id)
+            owner_id_map = api.build_owner_id_map(users, rosters)  # this season's roster_id -> persistent owner_id
+        except Exception:
+            continue
+
+        seen_tx = set()
+        for wk in range(0, 19):
+            try:
+                txs = api.get_transactions(league_id, wk)
+            except Exception:
+                continue
+            for tx in txs:
+                tx_id = tx.get("transaction_id")
+                if tx_id in seen_tx or tx.get("status") != "complete" or tx.get("type") != "trade":
+                    continue
+                seen_tx.add(tx_id)
+                ts = tx.get("status_updated") or 0
+                for pk in (tx.get("draft_picks") or []):
+                    origin_owner = owner_id_map.get(pk.get("roster_id"))
+                    new_owner = owner_id_map.get(pk.get("owner_id"))
+                    if origin_owner is None or new_owner is None:
+                        continue
+                    try:
+                        key = (str(pk.get("season")), int(pk.get("round")), origin_owner)
+                    except (TypeError, ValueError):
+                        continue
+                    prev = log.get(key)
+                    if prev is None or ts > prev[0]:
+                        log[key] = (ts, new_owner)
+    return {k: v[1] for k, v in log.items()}
+
+
+def _resolve_pick_value(pk_season, pk_round, pk_orig_roster, current_season: int, values: dict,
+                         all_players: dict, trade_owner_id_map: dict) -> tuple:
+    """Returns (value, label, is_estimate). Follows the pick through however many re-trades
+    it went through (via our own reconstructed ownership log) before matching it to who
+    actually drafted with it."""
+    pk_season = int(pk_season)
+    pk_round = int(pk_round)
+
+    origin_owner_id = trade_owner_id_map.get(pk_orig_roster)
+    final_roster_id_draft_season = None
+
+    if origin_owner_id is not None:
+        ownership_log = build_pick_ownership_log()
+        final_owner_id = ownership_log.get((str(pk_season), pk_round, origin_owner_id), origin_owner_id)
+        final_roster_id_draft_season = _get_owner_id_to_roster_id(pk_season).get(final_owner_id)
+
+    df = get_draft_results(pk_season)
+    if not df.empty and final_roster_id_draft_season is not None:
+        match = df[(df["round"] == pk_round) & (df["roster_id"] == final_roster_id_draft_season)]
+        if not match.empty:
+            row = match.iloc[0]
+            pid = str(row.get("player_id", ""))
+            v = values.get(pid)
+            player_name = all_players.get(pid, {}).get("full_name", pid)
+            label = f"{pk_season} {_ordinal_round(pk_round)} ({player_name})"
+            return (v["value"] if v else 0), label, False
+
+    slot_label = get_pick_label(
+        pk_season, pk_round,
+        final_roster_id_draft_season if final_roster_id_draft_season is not None else pk_orig_roster
+    )
+    label = f"{pk_season} {_ordinal_round(pk_round)} Round Pick" + (f" ({slot_label})" if slot_label else "")
+    return estimate_pick_value(pk_season, pk_round, current_season), label, True
+
+
+TRADE_GRADE_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_grade_log.json")
+
+
+def _load_trade_grade_log() -> dict:
+    if os.path.exists(TRADE_GRADE_LOG_FILE):
+        try:
+            with open(TRADE_GRADE_LOG_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_trade_grade_log(log: dict) -> None:
+    try:
+        with open(TRADE_GRADE_LOG_FILE, "w") as f:
+            json.dump(log, f)
+    except Exception:
+        pass
+
+
+CONSOLIDATION_WEIGHTS = [1.0, 0.85, 0.70, 0.55, 0.40]
+
+
+def weighted_package_value(values_list: list) -> int:
+    """Diminishing-returns discount for multi-asset packages - one elite asset should
+    outweigh several lesser ones of equal raw total, since roster spots are scarce and
+    spreading value across more players carries more bust risk than one proven piece."""
+    ranked = sorted(values_list, reverse=True)
+    total = 0.0
+    for i, v in enumerate(ranked):
+        weight = CONSOLIDATION_WEIGHTS[i] if i < len(CONSOLIDATION_WEIGHTS) else CONSOLIDATION_WEIGHTS[-1]
+        total += v * weight
+    return round(total)
+
+
+def build_trade_grades(seasons: tuple, current_season: int) -> pd.DataFrame:
+    all_players = api.get_all_players()
+    values = get_fantasycalc_values()
+    rows = []
+    grade_log = _load_trade_grade_log()
+    log_dirty = False
+    today_str = datetime.date.today().isoformat()
+
+    for season in seasons:
+        league_id = api.SEASON_LEAGUE_IDS.get(season)
+        if not league_id:
+            continue
+        try:
+            rosters = api.get_rosters(league_id)
+            users = api.get_users(league_id)
+        except Exception:
+            continue
+        owner_map = api.build_owner_map(users, rosters)
+        trade_owner_id_map = api.build_owner_id_map(users, rosters)  # this season's roster_id -> owner_id
+
+        seen_tx = set()
+        for wk in range(0, 19):
+            try:
+                txs = api.get_transactions(league_id, wk)
+            except Exception:
+                continue
+            for tx in txs:
+                tx_id = tx.get("transaction_id")
+                if tx_id in seen_tx or tx.get("status") != "complete" or tx.get("type") != "trade":
+                    continue
+                seen_tx.add(tx_id)
+
+                adds = tx.get("adds") or {}
+                draft_picks = tx.get("draft_picks") or []
+                ts = tx.get("status_updated")
+                date_str = pd.to_datetime(ts, unit="ms").strftime("%Y-%m-%d") if ts else ""
+
+                rosters_involved = set(adds.values())
+                for pk in draft_picks:
+                    if pk.get("owner_id") is not None:
+                        rosters_involved.add(pk["owner_id"])
+                if len(rosters_involved) != 2:
+                    continue
+
+                side_a, side_b = list(rosters_involved)
+                side_data = {}
+                for rid in (side_a, side_b):
+                    asset_values = []
+                    assets = []
+                    for pid, r in adds.items():
+                        if r != rid:
+                            continue
+                        v = values.get(str(pid))
+                        p = all_players.get(pid, {})
+                        val = v["value"] if v else 0
+                        asset_values.append(val)
+                        assets.append(f"{p.get('full_name', pid)} ({val:,})")
+                    for pk in draft_picks:
+                        if pk.get("owner_id") != rid:
+                            continue
+                        pk_val, pk_label, is_est = _resolve_pick_value(
+                            pk.get("season"), pk.get("round"), pk.get("roster_id"), current_season, values, all_players, trade_owner_id_map
+                        )
+                        asset_values.append(pk_val)
+                        assets.append(f"{pk_label} ({pk_val:,}{'*' if is_est else ''})")
+                    total = weighted_package_value(asset_values)
+                    side_data[rid] = {"team": owner_map.get(rid, "Unknown"), "value": total, "assets": ", ".join(assets)}
+
+                val_a, val_b = side_data[side_a]["value"], side_data[side_b]["value"]
+                if val_a == 0 and val_b == 0:
+                    continue
+                avg = max((val_a + val_b) / 2, 1)
+                margin_a = (val_a - val_b) / avg * 100
+
+                def grade_and_label(margin):
+                    abs_m = abs(margin)
+                    if abs_m < 22:
+                        return "C", "Fair"
+                    elif abs_m < 38:
+                        return ("B", "Win") if margin > 0 else ("D", "Loss")
+                    elif abs_m < 55:
+                        return ("A-", "Win") if margin > 0 else ("D-", "Loss")
+                    elif abs_m < 75:
+                        return ("A", "Win") if margin > 0 else ("F", "Loss")
+                    else:
+                        return ("A+", "Win") if margin > 0 else ("F", "Loss")
+
+                grade_a, label_a = grade_and_label(margin_a)
+                grade_b, label_b = grade_and_label(-margin_a)
+
+                at_deal = grade_log.get(tx_id)
+                if at_deal is None and date_str >= today_str:
+                    at_deal = {"date": date_str, "grade_a": grade_a, "grade_b": grade_b}
+                    grade_log[tx_id] = at_deal
+                    log_dirty = True
+
+                rows.append({
+                    "Season": season, "Week": wk, "Date": date_str,
+                    "Team A": side_data[side_a]["team"], "Received A": side_data[side_a]["assets"],
+                    "Value A": val_a, "Grade A": grade_a, "Result A": label_a,
+                    "Team B": side_data[side_b]["team"], "Received B": side_data[side_b]["assets"],
+                    "Value B": val_b, "Grade B": grade_b, "Result B": label_b,
+                    "Value Gap": abs(val_a - val_b), "Margin %": round(abs(margin_a), 1),
+                    "At-Deal Grade A": at_deal["grade_a"] if at_deal else None,
+                    "At-Deal Grade B": at_deal["grade_b"] if at_deal else None,
+                })
+
+    if log_dirty:
+        _save_trade_grade_log(grade_log)
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("Value Gap", ascending=False).reset_index(drop=True)
+    return df
+
+
+def build_most_traded_players(seasons: tuple, n: int = 10) -> list:
+    """Players who've changed hands via trade the most, with a breakdown of which teams acquired them."""
+    all_players = api.get_all_players()
+    counts = {}  # pid -> {"total": int, "by_team": {team: int}}
+
+    for season in seasons:
+        league_id = api.SEASON_LEAGUE_IDS.get(season)
+        if not league_id:
+            continue
+        try:
+            rosters = api.get_rosters(league_id)
+            users = api.get_users(league_id)
+        except Exception:
+            continue
+        owner_map = api.build_owner_map(users, rosters)
+
+        seen_tx = set()
+        for wk in range(0, 19):
+            try:
+                txs = api.get_transactions(league_id, wk)
+            except Exception:
+                continue
+            for tx in txs:
+                tx_id = tx.get("transaction_id")
+                if tx_id in seen_tx or tx.get("status") != "complete" or tx.get("type") != "trade":
+                    continue
+                seen_tx.add(tx_id)
+                adds = tx.get("adds") or {}
+                for pid, rid in adds.items():
+                    team = owner_map.get(rid, "Unknown")
+                    entry = counts.setdefault(pid, {"total": 0, "by_team": {}})
+                    entry["total"] += 1
+                    entry["by_team"][team] = entry["by_team"].get(team, 0) + 1
+
+    results = []
+    for pid, data in counts.items():
+        p = all_players.get(pid, {})
+        breakdown = sorted(data["by_team"].items(), key=lambda x: x[1], reverse=True)
+        results.append({
+            "player_id": pid,
+            "name": p.get("full_name", pid),
+            "position": p.get("position", ""),
+            "total": data["total"],
+            "breakdown": breakdown,
+        })
+
+    results.sort(key=lambda r: r["total"], reverse=True)
+    return results[:n]
